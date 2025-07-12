@@ -15,11 +15,11 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <None Include="..\..\..\..\Downloads\SDL3-devel-3.2.10-VC\SDL3-3.2.10\lib\x64\SDL3.dll" />
+  </ItemGroup>
+  <ItemGroup>
     <ClCompile Include="jpegDecoder.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="..\..\..\..\Downloads\SDL3-devel-3.2.10-VC\SDL3-3.2.10\lib\x64\SDL3.dll" />
   </ItemGroup>
 </Project>
