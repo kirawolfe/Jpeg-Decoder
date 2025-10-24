@@ -9,7 +9,8 @@ struct huffmanNode {
 };
 
 struct quantTable {
-	char data[8][8];
+	unsigned char data[8][8];
+	unsigned char info;
 };
 
 struct component {
@@ -19,6 +20,11 @@ struct component {
 	int oldDC;
 	unsigned char dcTable;
 	unsigned char acTable;
+};
+
+struct componentBlock {
+	float pixels[8][8];
+	unsigned char componentId;
 };
 
 struct pixelBlock {
@@ -62,8 +68,7 @@ void insertIntoTree(struct huffmanNode* root, unsigned int code, int length, uns
 				node->left->type = node->type;
 			}
 			node = node->left;
-		}
-		else {
+		} else {
 			if (!node->right) {
 				node->right = malloc(sizeof(struct huffmanNode));
 				node->right->data = 0xFF;
@@ -112,22 +117,18 @@ void deleteTree(struct huffmanNode* root) {
 }
 
 void printCodes(struct huffmanNode* root, int arr[], int top) {
-
 	if (root->left && root->right) {
 		arr[top] = 0;
 		printCodes(root->left, arr, top + 1);
 		arr[top] = 1;
 		printCodes(root->right, arr, top + 1);
-	}
-	else if (root->left) {
+	} else if (root->left) {
 		arr[top] = 0;
 		printCodes(root->left, arr, top + 1);
-	}
-	else if (root->right) {
+	} else if (root->right) {
 		arr[top] = 1;
 		printCodes(root->right, arr, top + 1);
 	}
-
 	if (root->data != 255) {
 		printf("%d: ", root->data);
 		for (int i = 0; i < top; i++) {
@@ -138,7 +139,6 @@ void printCodes(struct huffmanNode* root, int arr[], int top) {
 }
 
 int main(int argc, char* argv[]) {
-
 	const int startOfImage = 0xFFD8;
 	const int startOfFrame0 = 0xFFC0;
 	const int startOfFrame2 = 0xFFC2;
@@ -160,14 +160,20 @@ int main(int argc, char* argv[]) {
 	char numComponents;
 	unsigned char numQTables;
 	struct component* components[3];
-	int idctPrecision = 8;
-	char dcCount = 0;
-	char acCount = 0;
+	int idctPrecision;
 	char tableCount = 0;
 	char sfyh = 1, sfyv = 1, sfy = 1;
-	struct pixelBlock* imgBlocks = NULL, * superBlocks = NULL;
+	int qBlockNum = 0;
+	int eobrun = 0;
+	int totalBlocks;
+	struct pixelBlock* imgBlocks = NULL;
+	struct componentBlock* preTransBlocks = NULL;
+	struct componentBlock* out = NULL;
 	unsigned char* linearizedImg;
-	unsigned short height, width;
+	unsigned short height, trueHeight, width, trueWidth;
+	int yBlocksPerRow, yBlocksPerCol, totalYBlocks;
+	int cbBlocksPerRow, cbBlocksPerCol, totalCbBlocks;
+	int crBlocksPerRow, crBlocksPerCol, totalCrBlocks;
 	struct huffmanNode* dcTrees[8];
 	struct huffmanNode* acTrees[8];
 	struct quantTable* qtables[8];
@@ -176,7 +182,17 @@ int main(int argc, char* argv[]) {
 	char lengths[16];
 	FILE* img_ptr;
 	char* fileName = argv[1];
-
+	struct componentBlock* qBlocks = NULL;
+	struct component* currentComponent = NULL;
+	char sfcbh;
+	char sfcbv;
+	char sfcrh;
+	char sfcrv;
+	char cbRatioH;
+	char cbRatioV;
+	char crRatioH;
+	char crRatioV;
+	bool progressive;
 	errno_t fileError = fopen_s(&img_ptr, fileName, "rb");
 	if (fileError != 0) {
 		perror("Error opening file");
@@ -206,18 +222,14 @@ int main(int argc, char* argv[]) {
 					int arr[16];
 					printCodes(tree, arr, 0);
 					if (tree->type == 0) {
-						dcTrees[dcCount] = tree;
-						dcCount++;
-					}
-					else {
-						acTrees[acCount] = tree;
-						acCount++;
+						dcTrees[tree->id] = tree;
+					} else {
+						acTrees[tree->id] = tree;
 					}
 					free(elements);
 					printf("\n");
 				}
-			}
-			else if (value == quantTable) {
+			} else if (value == quantTable) {
 				bytesRead = fread(currentBytes, 1, 2, img_ptr);
 				unsigned short length = (unsigned char)currentBytes[0] << 8 | ((unsigned char)currentBytes[1]);
 				numQTables = length / 64;
@@ -229,6 +241,7 @@ int main(int argc, char* argv[]) {
 					if (!qt) {
 						printf("allocation failed\n");
 					}
+					qt->info = qtinfo;
 					for (int j = 0; j < 8; j++) {
 						for (int k = 0; k < 8; k++) {
 							bytesRead = fread(currentBytes, 1, 1, img_ptr);
@@ -237,22 +250,35 @@ int main(int argc, char* argv[]) {
 					}
 					qtables[tableCount++] = qt;
 				}
-			}
-			else if (value == startOfFrame0) {
+			} else if (value == startOfFrame0 || value == startOfFrame2) {
+				progressive = false;
+				if (value == startOfFrame2) {
+					progressive = true;
+				}
 				bytesRead = fread(currentBytes, 1, 2, img_ptr);
 				unsigned short length = (unsigned char)currentBytes[0] << 8 | ((unsigned char)currentBytes[1]);
 				bytesRead = fread(currentBytes, 1, 1, img_ptr);
-				char precision = currentBytes[0];
+				idctPrecision = currentBytes[0];
+				for (int u = 0; u < idctPrecision; u++) {
+					for (int v = 0; v < idctPrecision; v++) {
+						idctTable[u][v] = cos(((2.0 * v + 1.0) * u * 3.14159) / 16.0);
+					}
+				}
 				bytesRead = fread(currentBytes, 1, 2, img_ptr);
-				height = (unsigned char)currentBytes[0] << 8 | ((unsigned char)currentBytes[1]);
+				trueHeight = (unsigned char)currentBytes[0] << 8 | ((unsigned char)currentBytes[1]);
+				height = trueHeight;
 				while (height % 8 != 0) {
 					height++;
 				}
 				bytesRead = fread(currentBytes, 1, 2, img_ptr);
-				width = (unsigned char)currentBytes[0] << 8 | ((unsigned char)currentBytes[1]);
+				trueWidth = (unsigned char)currentBytes[0] << 8 | ((unsigned char)currentBytes[1]);
+				width = trueWidth;
 				while (width % 8 != 0) {
 					width++;
 				}
+				yBlocksPerRow = width / 8;
+				yBlocksPerCol = height / 8;
+				totalYBlocks = yBlocksPerRow * yBlocksPerCol;
 				bytesRead = fread(currentBytes, 1, 1, img_ptr);
 				numComponents = currentBytes[0];
 				for (int i = 0; i < numComponents; i++) {
@@ -269,57 +295,90 @@ int main(int argc, char* argv[]) {
 					newComponent->oldDC = 0;
 					components[i] = newComponent;
 				}
-			}
-			else if (value == startOfScan) {
+				sfyh = components[0]->samplingFactors >> 4 & 0x0F;
+				sfyv = components[0]->samplingFactors & 0x0F;
+				sfy = sfyh * sfyv;
+				sfcbh = components[1]->samplingFactors >> 4 & 0x0F;
+				sfcbv = components[1]->samplingFactors & 0x0F;
+				sfcrh = components[2]->samplingFactors >> 4 & 0x0F;
+				sfcrv = components[2]->samplingFactors & 0x0F;
+				cbRatioH = sfyh / sfcbh;
+				cbRatioV = sfyv / sfcbv;
+				crRatioH = sfyh / sfcrh;
+				crRatioV = sfyv / sfcrv;
+				cbBlocksPerRow = ceil((float)yBlocksPerRow / cbRatioH);
+				cbBlocksPerCol = ceil((float)yBlocksPerCol / cbRatioV);
+				totalCbBlocks = cbBlocksPerCol * cbBlocksPerRow;
+				crBlocksPerRow = ceil((float)yBlocksPerRow / crRatioH);
+				crBlocksPerCol = ceil((float)yBlocksPerCol / crRatioV);
+				totalCrBlocks = crBlocksPerCol * crBlocksPerRow;
+				totalBlocks = totalYBlocks + totalCbBlocks + totalCrBlocks;
+				qBlocks = malloc(sizeof(struct componentBlock) * totalBlocks);
+				for (int i = 0; i < (totalYBlocks + totalCbBlocks + totalCrBlocks); i++) {
+					for (int j = 0; j < 8; j++) {
+						for (int k = 0; k < 8; k++) {
+							qBlocks[i].pixels[j][k] = 0;
+						}
+					}
+					if (i < totalYBlocks) {
+						qBlocks[i].componentId = 1;
+					} else if (i < totalYBlocks + totalCbBlocks) {
+						qBlocks[i].componentId = 2;
+					} else if (i < totalBlocks) {
+						qBlocks[i].componentId = 3;
+					} else {
+						qBlocks[i].componentId = 0;
+					}
+				}
+				out = malloc(sizeof(struct componentBlock) * totalBlocks);
+				for (int i = 0; i < totalBlocks; i++) {
+					for (int j = 0; j < 8; j++) {
+						for (int k = 0; k < 8; k++) {
+							out[i].pixels[j][k] = 0;
+						}
+					}
+				}
+				preTransBlocks = malloc(sizeof(struct componentBlock) * totalBlocks);
+				for (int i = 0; i < totalBlocks; i++) {
+					for (int j = 0; j < 8; j++) {
+						for (int k = 0; k < 8; k++) {
+							preTransBlocks[i].pixels[j][k] = 0;
+						}
+					}
+				}
+				currentComponent = components[0];
+			} else if (value == startOfScan) {
+				printf("Scan started at %x\n", ftell(img_ptr));
 				bytesRead = fread(currentBytes, 1, 2, img_ptr);
 				unsigned short length = (unsigned char)currentBytes[0] << 8 | ((unsigned char)currentBytes[1]);
 				bytesRead = fread(currentBytes, 1, 1, img_ptr);
 				char numComponentsScan = currentBytes[0];
+				char componentId = 0;
 				for (int g = 0; g < numComponentsScan; g++) {
 					bytesRead = fread(currentBytes, 1, 1, img_ptr);
-					char componentId = currentBytes[0];
+					componentId = currentBytes[0];
 					bytesRead = fread(currentBytes, 1, 1, img_ptr);
 					char tableNums = currentBytes[0];
 					components[componentId - 1]->dcTable = (tableNums >> 4) & 0x0F;
 					components[componentId - 1]->acTable = tableNums & 0x0F;
 				}
-				sfyh = components[0]->samplingFactors >> 4 & 0x0F;
-				sfyv = components[0]->samplingFactors & 0x0F;
-				sfy = sfyh * sfyv;
-				char sfcbh = components[1]->samplingFactors >> 4 & 0x0F;
-				char sfcbv = components[1]->samplingFactors & 0x0F;
-				char sfcrh = components[2]->samplingFactors >> 4 & 0x0F;
-				char sfcrv = components[2]->samplingFactors & 0x0F;
-				int cbRatioH = sfyh / sfcbh;
-				int cbRatioV = sfyv / sfcbv;
-				int crRatioH = sfyh / sfcrh;
-				int crRatioV = sfyv / sfcrv;
-				for (int i = 0; i < 3; i++) {
-					bytesRead = fread(currentBytes, 1, 1, img_ptr);
-				}
-				for (int u = 0; u < idctPrecision; u++) {
-					for (int v = 0; v < idctPrecision; v++) {
-						idctTable[u][v] = cos(((2.0 * v + 1.0) * u * 3.14159) / 16.0);
-					}
-				}
+				bytesRead = fread(currentBytes, 1, 1, img_ptr);
+				char ss = currentBytes[0];
+				bytesRead = fread(currentBytes, 1, 1, img_ptr);
+				char se = currentBytes[0];
+				bytesRead = fread(currentBytes, 1, 1, img_ptr);
+				char ah = currentBytes[0] >> 4 & 0x0F;
+				char al = currentBytes[0] & 0x0F;
+				printf("ss: %d se: %d ah: %d al: %d, numComponentsScan: %d, componentId: %d\n", ss, se, ah, al, numComponentsScan, componentId);
 				char endFlag = 0;
 				char endImgFlag = 0;
-				int count2 = 0;
-				imgBlocks = malloc(sizeof(struct pixelBlock) * (height / 8) * (width / 8));
-				printf("imgBlocks size: %d bytes, %d blocks\n", sizeof(struct pixelBlock) * (height / 8) * (width / 8), (height / 8) * (width / 8));
+				char endScanFlag = 0;
+				imgBlocks = malloc(sizeof(struct pixelBlock) * totalYBlocks);
 				if (!imgBlocks) {
 					printf("allocation failed\n");
 				}
-				unsigned int counter = 0;
-				char offset = 0;
-				double out[8][8][8];
-				for (int i = 0; i < 3; i++) {
-					for (int j = 0; j < 8; j++) {
-						for (int k = 0; k < 8; k++) {
-							out[i][j][k] = 0.0;
-						}
-					}
-				}
+				int blocks = 0;
+				char offset = 0;;
 				bytesRead = fread(currentBytes, 1, 1, img_ptr);
 				currentBytes[1] = currentBytes[0];
 				bytesRead = fread(currentBytes, 1, 1, img_ptr);
@@ -329,133 +388,252 @@ int main(int argc, char* argv[]) {
 					}
 					break;
 				}
-				for (int y = 0; y < height / (8 * sfyv); y++) {
-					for (int x = 0; x < width / (8 * sfyh); x++) {
-						if (!endImgFlag) {
-							int blockNum = 0;
-							for (int i = 0; i < numComponents; i++) {
-								if (!endFlag) {
-									int idctBase[8][8];
-									struct component* currentComponent = components[i];
-									int qtnum = currentComponent->quantTable;
-									char sampleFactorH = currentComponent->samplingFactors >> 4 & 0x0F;
-									char sampleFactorV = currentComponent->samplingFactors & 0x0F;
-									for (int horiz = 0; horiz < sampleFactorH; horiz++) {
-										for (int vert = 0; vert < sampleFactorV; vert++) {
-											struct quantTable* qt = qtables[qtnum];
-											struct huffmanNode* dcTree = dcTrees[currentComponent->dcTable];
-											struct huffmanNode* node = copyTree(dcTree);
-											struct huffmanNode* root = node;
-											while (node->data == 0xFF) {
-												if (((currentBytes[1] >> (7 - offset)) & 1) != 0 && (node->right)) {
-													node = node->right;
-												}
-												else if (node->left) {
-													node = node->left;
-												}
-												else {
-													idctBase[0][0] = 0;
-												}
-												offset++;
-												if (offset == 8) {
-													offset = 0;
-													currentBytes[1] = currentBytes[0];
-													bytesRead = fread(currentBytes, 1, 1, img_ptr);
-													if (currentBytes[1] == 0xFF) {
-														if (currentBytes[0] == 0) {
-															printf("Skipping FF00 at %x\n", ftell(img_ptr));
-															bytesRead = fread(currentBytes, 1, 1, img_ptr);
-															if (bytesRead != 1) {
-																if (feof(img_ptr)) {
-																	endFlag = 1;
-																}
-																break;
-															}
-														}
-														else {
-															break;
-														}
-													}
-												}
+				if (currentBytes[1] == 0xFF) {
+					if (currentBytes[0] == 0) {
+						bytesRead = fread(currentBytes, 1, 1, img_ptr);
+						if (bytesRead != 1) {
+							if (feof(img_ptr)) {
+								endFlag = 1;
+							}
+							break;
+						}
+					} else {
+						printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+						if (currentBytes[0] == 0xD9) {
+							endImgFlag = 1;
+						}
+						endScanFlag = 1;
+						endFlag = 1;
+						break;
+					}
+				}
+				if (componentId == 1 || numComponentsScan == numComponents) {
+					qBlockNum = 0;
+				} else if (componentId == 2) {
+					qBlockNum = totalYBlocks;
+				} else if (componentId == 3) {
+					qBlockNum = totalYBlocks + totalCbBlocks;
+				}
+				if (numComponentsScan == 1) {
+					if (componentId == 1) {
+						blocks = totalYBlocks;
+					} else if (componentId == 2) {
+						blocks = totalCbBlocks;
+					} else if (componentId == 3) {
+						blocks = totalCrBlocks;
+					}
+				} else if (numComponentsScan == 3) {
+					blocks = totalBlocks;
+					componentId = 1;
+				}
+				if (componentId != currentComponent->id) {
+					eobrun = 0;
+				}
+				currentComponent = components[componentId - 1];
+				for (int x = 0; x < blocks; x++) {
+					if (!endImgFlag && !endScanFlag) {
+						if (!endFlag) {
+							int idctBase[8][8];
+							int qtnum = currentComponent->quantTable;
+							struct quantTable* qt = qtables[qtnum];
+							char sampleFactorH = currentComponent->samplingFactors >> 4 & 0x0F;
+							char sampleFactorV = currentComponent->samplingFactors & 0x0F;
+							for (int a = 0; a < 8; a++) {
+								for (int b = 0; b < 8; b++) {
+									idctBase[a][b] = 0;
+								}
+							}
+							preTransBlocks[qBlockNum].componentId = currentComponent->id;
+							if (eobrun == 0) {
+								if (ss == 0) {
+									if (ah == 0) {
+										struct huffmanNode* dcTree = dcTrees[currentComponent->dcTable];
+										struct huffmanNode* node = copyTree(dcTree);
+										while (node->data == 0xFF) {
+											if (((currentBytes[1] >> (7 - offset)) & 1) != 0 && (node->right)) {
+												node = node->right;
+											} else if (node->left) {
+												node = node->left;
+											} else {
+												idctBase[0][0] = 0;
 											}
-											char category = node->data & 0x0F;
-											int magnitude = 0;
-											for (int t = 0; t < category; t++) {
-												if (offset == 8) {
-													offset = 0;
-													currentBytes[1] = currentBytes[0];
-													bytesRead = fread(currentBytes, 1, 1, img_ptr);
-													if (currentBytes[1] == 0xFF) {
-														if (currentBytes[0] == 0) {
-															printf("Skipping FF00 at %x\n", ftell(img_ptr));
-															bytesRead = fread(currentBytes, 1, 1, img_ptr);
-															if (bytesRead != 1) {
-																if (feof(img_ptr)) {
-																	endFlag = 1;
-																}
-																break;
-															}
-														}
-														else {
-															printf("Marker found: %x\n", currentBytes[1] << 8 | currentBytes[0]);
-															if (currentBytes[0] == 0xD9) {
-																endImgFlag = 1;
-																break;
-															}
-															break;
-														}
-													}
-												}
-												magnitude = (magnitude << 1) | ((currentBytes[1] >> (7 - offset)) & 1);
-												offset++;
-												if (offset == 8) {
-													offset = 0;
-													currentBytes[1] = currentBytes[0];
-													bytesRead = fread(currentBytes, 1, 1, img_ptr);
-													if (currentBytes[1] == 0xFF) {
-														if (currentBytes[0] == 0) {
-															printf("Skipping FF00 at %x\n", ftell(img_ptr));
-															bytesRead = fread(currentBytes, 1, 1, img_ptr);
-															if (bytesRead != 1) {
-																if (feof(img_ptr)) {
-																	endFlag = 1;
-																}
-																break;
-															}
-														}
-														else {
-															printf("Marker found: %x\n", currentBytes[1] << 8 | currentBytes[0]);
-															if (currentBytes[0] == 0xD9) {
-																endImgFlag = 1;
-																break;
+											offset++;
+											if (offset == 8) {
+												offset = 0;
+												currentBytes[1] = currentBytes[0];
+												bytesRead = fread(currentBytes, 1, 1, img_ptr);
+												if (currentBytes[1] == 0xFF) {
+													if (currentBytes[0] == 0) {
+														bytesRead = fread(currentBytes, 1, 1, img_ptr);
+														if (bytesRead != 1) {
+															if (feof(img_ptr)) {
+																endFlag = 1;
 															}
 															break;
 														}
+													} else {
+														printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+														if (currentBytes[0] == 0xD9) {
+															endImgFlag = 1;
+														}
+														endScanFlag = 1;
+														endFlag = 1;
+														break;
 													}
 												}
 											}
-											if (magnitude < (1 << (category - 1))) {
-												magnitude -= (1 << category) - 1;
+										}
+										char category = node->data & 0x0F;
+										int magnitude = 0;
+										for (int t = 0; t < category; t++) {
+											if (offset == 8) {
+												offset = 0;
+												currentBytes[1] = currentBytes[0];
+												bytesRead = fread(currentBytes, 1, 1, img_ptr);
+												if (currentBytes[1] == 0xFF) {
+													if (currentBytes[0] == 0) {
+														bytesRead = fread(currentBytes, 1, 1, img_ptr);
+														if (bytesRead != 1) {
+															if (feof(img_ptr)) {
+																endFlag = 1;
+															}
+															break;
+														}
+													} else {
+														printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+														if (currentBytes[0] == 0xD9) {
+															endImgFlag = 1;
+														}
+														endScanFlag = 1;
+														endFlag = 1;
+														break;
+													}
+												}
 											}
-											int newdc = currentComponent->oldDC + magnitude;
-											idctBase[0][0] = newdc;
-											currentComponent->oldDC = newdc;
-											struct huffmanNode* acTree = acTrees[currentComponent->acTable];
-											for (int j = 1; j < 64; j++) {
-												struct huffmanNode* node = copyTree(acTree);
-												while (node->data == 0xFF) {
-													if (((currentBytes[1] >> (7 - offset)) & 1) != 0 && (node->right)) {
-														node = node->right;
+											magnitude = (magnitude << 1) | ((currentBytes[1] >> (7 - offset)) & 1);
+											offset++;
+											if (offset == 8) {
+												offset = 0;
+												currentBytes[1] = currentBytes[0];
+												bytesRead = fread(currentBytes, 1, 1, img_ptr);
+												if (currentBytes[1] == 0xFF) {
+													if (currentBytes[0] == 0) {
+														bytesRead = fread(currentBytes, 1, 1, img_ptr);
+														if (bytesRead != 1) {
+															if (feof(img_ptr)) {
+																endFlag = 1;
+															}
+															break;
+														}
+													} else {
+														printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+														if (currentBytes[0] == 0xD9) {
+															endImgFlag = 1;
+														}
+														endScanFlag = 1;
+														endFlag = 1;
+														break;
 													}
-													else if (((currentBytes[1] >> (7 - offset)) & 1) == 0 && (node->left)) {
-														node = node->left;
-													}
-													else {
-														while (j < 64) {
-															idctBase[j / 8][j % 8] = 0;
-															j++;
+												}
+											}
+										}
+										if (magnitude < (1 << (category - 1))) {
+											magnitude -= (1 << category) - 1;
+										}
+										int newdc = currentComponent->oldDC + magnitude;
+										idctBase[0][0] = newdc;
+										currentComponent->oldDC = newdc;
+										free(node);
+									} else {
+										qBlocks[qBlockNum].pixels[0][0] = (int)qBlocks[qBlockNum].pixels[0][0] | (((currentBytes[1] >> (7 - offset)) & 1) << al);
+										offset++;
+										if (offset == 8) {
+											offset = 0;
+											currentBytes[1] = currentBytes[0];
+											bytesRead = fread(currentBytes, 1, 1, img_ptr);
+											if (currentBytes[1] == 0xFF) {
+												if (currentBytes[0] == 0) {
+													bytesRead = fread(currentBytes, 1, 1, img_ptr);
+													if (bytesRead != 1) {
+														if (feof(img_ptr)) {
+															endFlag = 1;
 														}
 														break;
+													}
+												} else {
+													printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+													if (currentBytes[0] == 0xD9) {
+														endImgFlag = 1;;
+													}
+													endScanFlag = 1;
+													endFlag = 1;
+													break;
+												}
+											}
+										}
+									}
+								}
+								char nodeData = 0;
+								struct huffmanNode* acTree = acTrees[currentComponent->acTable];
+								struct huffmanNode* node = (struct huffmanNode*)malloc(sizeof(struct huffmanNode));
+								if (se > 0) {
+									int start = (ss > 0) ? ss : 1;
+									for (int j = start; j <= se; j++) {
+										node = copyTree(acTree);
+										while (node->data == 0xFF) {
+											if (((currentBytes[1] >> (7 - offset)) & 1) != 0 && (node->right)) {
+												node = node->right;
+											} else if (((currentBytes[1] >> (7 - offset)) & 1) == 0 && (node->left)) {
+												node = node->left;
+											} else {
+												while (j < 64) {
+													idctBase[j / 8][j % 8] = 0;
+													j++;
+												}
+												break;
+											}
+											offset++;
+											if (offset == 8) {
+												offset = 0;
+												currentBytes[1] = currentBytes[0];
+												bytesRead = fread(currentBytes, 1, 1, img_ptr);
+												if (currentBytes[1] == 0xFF) {
+													if (currentBytes[0] == 0) {
+														bytesRead = fread(currentBytes, 1, 1, img_ptr);
+														if (bytesRead != 1) {
+															if (feof(img_ptr)) {
+																endFlag = 1;
+															}
+															break;
+														}
+													} else {
+														printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+														if (currentBytes[0] == 0xD9) {
+															endImgFlag = 1;
+														}
+														endScanFlag = 1;
+														endFlag = 1;
+														break;
+													}
+												}
+											}
+											nodeData = node->data;
+										}
+										if (endScanFlag || endImgFlag || endFlag) {
+											break;
+										}
+										if (nodeData == 0) {
+											while (j <= se) {
+												if (progressive && ah > 0 && qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) {
+													int a = j / 8;
+													int b = j % 8;
+													char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
+													if (refineBit) {
+														if (qBlocks[qBlockNum].pixels[a][b] > 0) {
+															qBlocks[qBlockNum].pixels[a][b] += 1 << al;
+														} else {
+															qBlocks[qBlockNum].pixels[a][b] -= 1 << al;
+														}
 													}
 													offset++;
 													if (offset == 8) {
@@ -464,7 +642,6 @@ int main(int argc, char* argv[]) {
 														bytesRead = fread(currentBytes, 1, 1, img_ptr);
 														if (currentBytes[1] == 0xFF) {
 															if (currentBytes[0] == 0) {
-																printf("Skipping FF00 at %x\n", ftell(img_ptr));
 																bytesRead = fread(currentBytes, 1, 1, img_ptr);
 																if (bytesRead != 1) {
 																	if (feof(img_ptr)) {
@@ -472,58 +649,52 @@ int main(int argc, char* argv[]) {
 																	}
 																	break;
 																}
-															}
-															else {
-																printf("Marker found: %x\n", currentBytes[1] << 8 | currentBytes[0]);
+															} else {
+																printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
 																if (currentBytes[0] == 0xD9) {
 																	endImgFlag = 1;
-																	break;
 																}
+																endScanFlag = 1;
+																endFlag = 1;
 																break;
 															}
 														}
 													}
 												}
-												if (node->data == 0) {
-													while (j < 64) {
-														idctBase[j / 8][j % 8] = 0;
-														j++;
-													}
+												j++;
+											}
+											break;
+										}
+										char category = nodeData & 0x0F;
+										char runLength = (nodeData >> 4) & 0x0F;
+										if (ah == 0) {
+											for (int q = 0; q < runLength; q++) {
+												if (j > se) {
 													break;
 												}
-												char runLength = (node->data >> 4) & 0x0F;
-												for (int q = 0; q < runLength; q++) {
-													if (j >= 64) {
-														break;
-													}
-													idctBase[j / 8][j % 8] = 0;
-													j++;
-												}
-												if (node->data == 0xF0) {
-													if (j >= 64) {
-														break;
-													}
-													idctBase[j / 8][j % 8] = 0;
-													j++;
-												}
-												char category = node->data & 0x0F;
-												if (category == 0 && runLength != 0x0F) {
-													while (j < 64) {
-														idctBase[j / 8][j % 8] = 0;
-														j++;
-													}
-													printf("end of block\n");
-													break;
-												}
-												int magnitude = 0;
-												for (int t = 0; t < category; t++) {
+												idctBase[j / 8][j % 8] = 0;
+												j++;
+											}
+										}
+										if (nodeData == 0xF0) {
+											if (j > se) {
+												break;
+											}
+											idctBase[j / 8][j % 8] = 0;
+											j++;
+										}
+										if (category == 0 && runLength != 0x0F) {
+											if (progressive) {
+												int v = 0;
+												for (int p = 0; p < runLength; p++) {
+													v += (currentBytes[1] >> (7 - offset)) & 1;
+													offset++;
 													if (offset == 8) {
 														offset = 0;
 														currentBytes[1] = currentBytes[0];
 														bytesRead = fread(currentBytes, 1, 1, img_ptr);
 														if (currentBytes[1] == 0xFF) {
 															if (currentBytes[0] == 0) {
-																printf("Skipping FF00 at %x\n", ftell(img_ptr));
 																bytesRead = fread(currentBytes, 1, 1, img_ptr);
 																if (bytesRead != 1) {
 																	if (feof(img_ptr)) {
@@ -531,17 +702,75 @@ int main(int argc, char* argv[]) {
 																	}
 																	break;
 																}
-															}
-															else {
-																printf("Marker found: %x\n", currentBytes[1] << 8 | currentBytes[0]);
+															} else {
+																printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
 																if (currentBytes[0] == 0xD9) {
 																	endImgFlag = 1;
-																	break;
 																}
+																endScanFlag = 1;
+																endFlag = 1;
 																break;
 															}
 														}
 													}
+													v <<= 1;
+												}
+												if (!endScanFlag) {
+													eobrun = (1 << runLength) + v / 2 - 1;
+													preTransBlocks[qBlockNum].componentId = currentComponent->id;
+													while (j <= se) {
+														if (progressive && ah > 0 && qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) {
+															int a = j / 8;
+															int b = j % 8;
+															char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
+															if (refineBit) {
+																if (qBlocks[qBlockNum].pixels[a][b] > 0) {
+																	qBlocks[qBlockNum].pixels[a][b] += 1 << al;
+																} else {
+																	qBlocks[qBlockNum].pixels[a][b] -= 1 << al;
+																}
+															}
+															offset++;
+															if (offset == 8) {
+																offset = 0;
+																currentBytes[1] = currentBytes[0];
+																bytesRead = fread(currentBytes, 1, 1, img_ptr);
+																if (currentBytes[1] == 0xFF) {
+																	if (currentBytes[0] == 0) {
+																		bytesRead = fread(currentBytes, 1, 1, img_ptr);
+																		if (bytesRead != 1) {
+																			if (feof(img_ptr)) {
+																				endFlag = 1;
+																			}
+																			break;
+																		}
+																	} else {
+																		printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+																		if (currentBytes[0] == 0xD9) {
+																			endImgFlag = 1;
+																		}
+																		endScanFlag = 1;
+																		endFlag = 1;
+																		break;
+																	}
+																}
+															}
+														}
+														j++;
+													}
+												}
+											} else {
+												while (j < 64) {
+													idctBase[j / 8][j % 8] = 0;
+													j++;
+												}
+											}
+											break;
+										}
+										int magnitude = 0;
+										if (j >= ss && j <= se) {
+											if (ah == 0) {
+												for (int t = 0; t < category; t++) {
 													magnitude = (magnitude << 1) | ((currentBytes[1] >> (7 - offset)) & 1);
 													offset++;
 													if (offset == 8) {
@@ -550,7 +779,6 @@ int main(int argc, char* argv[]) {
 														bytesRead = fread(currentBytes, 1, 1, img_ptr);
 														if (currentBytes[1] == 0xFF) {
 															if (currentBytes[0] == 0) {
-																printf("Skipping FF00 at %x\n", ftell(img_ptr));
 																bytesRead = fread(currentBytes, 1, 1, img_ptr);
 																if (bytesRead != 1) {
 																	if (feof(img_ptr)) {
@@ -558,167 +786,377 @@ int main(int argc, char* argv[]) {
 																	}
 																	break;
 																}
-															}
-															else {
-																printf("Marker found: %x\n", currentBytes[1] << 8 | currentBytes[0]);
+															} else {
+																printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
 																if (currentBytes[0] == 0xD9) {
 																	endImgFlag = 1;
-																	break;
 																}
+																endScanFlag = 1;
+																endFlag = 1;
 																break;
 															}
 														}
 													}
 												}
-												value = magnitude;
 												if (magnitude < (1 << (category - 1))) {
 													magnitude -= (1 << category) - 1;
 												}
 												idctBase[j / 8][j % 8] = magnitude;
-											}
-											for (int a = 0; a < 8; a++) {
-												for (int b = 0; b < 8; b++) {
-													idctBase[a][b] = idctBase[a][b] * qt->data[a][b];
-												}
-											}
-											for (int a = 0; a < 8; a++) {
-												for (int b = 0; b < 8; b++) {
-													rearranged[a][b] = idctBase[zigzag[a][b] / 8][zigzag[a][b] % 8];
-												}
-											}
-											for (int a = 0; a < 8; a++) {
-												for (int b = 0; b < 8; b++) {
-													double localSum = 0.0;
-													for (int u = 0; u < idctPrecision; u++) {
-														for (int v = 0; v < idctPrecision; v++) {
-															double normCoeff = 1.0;
-															if (u == 0) {
-																normCoeff *= 1.0 / sqrt(2.0);
+											} else {
+												if (category == 1) {
+													int f = runLength;
+													char extraBit = ((currentBytes[1] >> (7 - offset)) & 1);
+													offset++;
+													if (offset == 8) {
+														offset = 0;
+														currentBytes[1] = currentBytes[0];
+														bytesRead = fread(currentBytes, 1, 1, img_ptr);
+														if (currentBytes[1] == 0xFF) {
+															if (currentBytes[0] == 0) {
+																bytesRead = fread(currentBytes, 1, 1, img_ptr);
+																if (bytesRead != 1) {
+																	if (feof(img_ptr)) {
+																		endFlag = 1;
+																	}
+																	break;
+																}
+															} else {
+																printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+																if (currentBytes[0] == 0xD9) {
+																	endImgFlag = 1;
+																}
+																endScanFlag = 1;
+																endFlag = 1;
+																break;
 															}
-															if (v == 0) {
-																normCoeff *= 1.0 / sqrt(2.0);
-															}
-															localSum += normCoeff * (double)rearranged[u][v] * idctTable[u][a] * idctTable[v][b];
 														}
 													}
-													out[blockNum][a][b] = round(localSum / 4.0) + 128;
+													while (f > 0 || qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0 && j <= se) {
+														if (qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) {
+															int a = j / 8;
+															int b = j % 8;
+															char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
+															if (refineBit) {
+																if (qBlocks[qBlockNum].pixels[a][b] > 0) {
+																	qBlocks[qBlockNum].pixels[a][b] += 1 << al;
+																} else {
+																	qBlocks[qBlockNum].pixels[a][b] -= 1 << al;
+																}
+															}
+															offset++;
+															if (offset == 8) {
+																offset = 0;
+																currentBytes[1] = currentBytes[0];
+																bytesRead = fread(currentBytes, 1, 1, img_ptr);
+																if (currentBytes[1] == 0xFF) {
+																	if (currentBytes[0] == 0) {
+																		bytesRead = fread(currentBytes, 1, 1, img_ptr);
+																		if (bytesRead != 1) {
+																			if (feof(img_ptr)) {
+																				endFlag = 1;
+																			}
+																			break;
+																		}
+																	} else {
+																		printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+																		if (currentBytes[0] == 0xD9) {
+																			endImgFlag = 1;
+																		}
+																		endScanFlag = 1;
+																		endFlag = 1;
+																		break;
+																	}
+																}
+															}
+														} else {
+															f--;
+														}
+														j++;
+													}
+													if (extraBit != 0) {
+														qBlocks[qBlockNum].pixels[j / 8][j % 8] = 1 << al;
+													} else {
+														qBlocks[qBlockNum].pixels[j / 8][j % 8] = -(1 << al);
+													}
+												} else if (category == 0) {
+													if (runLength == 0x0F) {
+														int f = runLength + 1;
+														while (f > 0) {
+															if (qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) {
+																int a = j / 8;
+																int b = j % 8;
+																char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
+																if (refineBit) {
+																	if (qBlocks[qBlockNum].pixels[a][b] > 0) {
+																		qBlocks[qBlockNum].pixels[a][b] += 1 << al;
+																	} else {
+																		qBlocks[qBlockNum].pixels[a][b] -= 1 << al;
+																	}
+																}
+																offset++;
+																if (offset == 8) {
+																	offset = 0;
+																	currentBytes[1] = currentBytes[0];
+																	bytesRead = fread(currentBytes, 1, 1, img_ptr);
+																	if (currentBytes[1] == 0xFF) {
+																		if (currentBytes[0] == 0) {
+																			bytesRead = fread(currentBytes, 1, 1, img_ptr);
+																			if (bytesRead != 1) {
+																				if (feof(img_ptr)) {
+																					endFlag = 1;
+																				}
+																				break;
+																			}
+																		} else {
+																			printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+																			if (currentBytes[0] == 0xD9) {
+																				endImgFlag = 1;
+																			}
+																			endScanFlag = 1;
+																			endFlag = 1;
+																			break;
+																		}
+																	}
+																}
+															} else {
+																f--;
+															}
+															j++;
+														}
+													}
 												}
 											}
-											blockNum++;
-											deleteTree(root);
+										}
+									}
+								}
+								for (int a = se + 1; a < 64; a++) {
+									idctBase[a / 8][a % 8] = 0;
+								}
+								if (!progressive || (se == 0 && ah == 0)) {
+									for (int a = 0; a < 8; a++) {
+										for (int b = 0; b < 8; b++) {
+											idctBase[a][b] <<= al;
+										}
+									}
+									if (!progressive) {
+										for (int a = 0; a < 8; a++) {
+											for (int b = 0; b < 8; b++) {
+												idctBase[a][b] = idctBase[a][b] * qt->data[a][b];
+											}
+										}
+									}
+									for (int a = 0; a < 8; a++) {
+										for (int b = 0; b < 8; b++) {
+											rearranged[a][b] = idctBase[zigzag[a][b] / 8][zigzag[a][b] % 8];
+											qBlocks[qBlockNum].pixels[a][b] = idctBase[a][b];
+											preTransBlocks[qBlockNum].pixels[a][b] = rearranged[a][b];
 										}
 									}
 								} else {
-									printf("end of file found\n");
-									break;
-								}
-							}
-							if (numComponents == 3) {
-								for (int z = 0; z < sfy; z++) {
-									for (int yIndex = 0; yIndex < 64; yIndex++) {
-										int yPosX = yIndex % 8;
-										int yPosY = yIndex / 8;
-										int cbPosX = ((z / sfyh) * 8 + yPosX) / cbRatioH;
-										int cbPosY = ((z % sfyh) * 8 + yPosY) / cbRatioV;
-										int crPosX = ((z / sfyh) * 8 + yPosX) / crRatioH;
-										int crPosY = ((z % sfyh) * 8 + yPosY) / crRatioV;
-										int Y = out[z][yPosX][yPosY];
-										int Cb = out[sfy][cbPosX][cbPosY];
-										int Cr = out[sfy + 1][crPosX][crPosY];
-										float R = Y + 1.402 * (Cr - 128);
-										float G = Y - 0.344136 * (Cb - 128) - 0.714136 * (Cr - 128);
-										float B = Y + 1.772 * (Cb - 128);
-										imgBlocks[count2].pixelsR[yPosX][yPosY] = (unsigned char)(R < 0 ? 0 : R > 255 ? 255 : round(R));
-										imgBlocks[count2].pixelsG[yPosX][yPosY] = (unsigned char)(G < 0 ? 0 : G > 255 ? 255 : round(G));
-										imgBlocks[count2].pixelsB[yPosX][yPosY] = (unsigned char)(B < 0 ? 0 : B > 255 ? 255 : round(B));
+									if (ah == 0) {
+										for (int index = ss; index <= se; index++) {
+											int a = index / 8;
+											int b = index % 8;
+											qBlocks[qBlockNum].pixels[a][b] = idctBase[a][b] << al;
+										}
 									}
-									count2++;
+								}
+								if (progressive) {
+									for (int index = 0; index < 64; index++) {
+										int a = index / 8;
+										int b = index % 8;
+										preTransBlocks[qBlockNum].pixels[a][b] = qBlocks[qBlockNum].pixels[zigzag[a][b] / 8][zigzag[a][b] % 8] * qt->data[zigzag[a][b] / 8][zigzag[a][b] % 8];
+									}
+								}
+								preTransBlocks[qBlockNum].componentId = currentComponent->id;
+								free(node);
+							} else {
+								for (int index = 0; index < 64; index++) {
+									int a = index / 8;
+									int b = index % 8;
+									if (ah > 0 && index >= ss && index <= se) {
+										if (qBlocks[qBlockNum].pixels[a][b] != 0) {
+											char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
+											if (refineBit) {
+												if (qBlocks[qBlockNum].pixels[a][b] > 0) {
+													qBlocks[qBlockNum].pixels[a][b] += 1 << al;
+												} else {
+													qBlocks[qBlockNum].pixels[a][b] -= 1 << al;
+												}
+											}
+											offset++;
+											if (offset == 8) {
+												offset = 0;
+												currentBytes[1] = currentBytes[0];
+												bytesRead = fread(currentBytes, 1, 1, img_ptr);
+												if (currentBytes[1] == 0xFF) {
+													if (currentBytes[0] == 0) {
+														bytesRead = fread(currentBytes, 1, 1, img_ptr);
+														if (bytesRead != 1) {
+															if (feof(img_ptr)) {
+																endFlag = 1;
+															}
+															break;
+														}
+													} else {
+														printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+														if (currentBytes[0] == 0xD9) {
+															endImgFlag = 1;
+														}
+														endScanFlag = 1;
+														endFlag = 1;
+														break;
+													}
+												}
+											}
+										}
+									}
+									preTransBlocks[qBlockNum].pixels[a][b] = qBlocks[qBlockNum].pixels[zigzag[a][b] / 8][zigzag[a][b] % 8] * qt->data[zigzag[a][b] / 8][zigzag[a][b] % 8];
+								}
+								preTransBlocks[qBlockNum].componentId = currentComponent->id;
+								eobrun--;
+							}
+							if (numComponentsScan == 1) {
+								if (currentComponent->id == 1) {
+									qBlockNum = x + 1;
+								} else if (currentComponent->id == 2) {
+									qBlockNum = totalYBlocks + x + 1;
+								} else if (currentComponent->id == 3) {
+									qBlockNum = totalYBlocks + totalCbBlocks + x + 1;
+								}
+							} else if (numComponentsScan == 3) {
+								int mcuPos = (x + 1) % (sfy + sfcbh * sfcbv + sfcrh * sfcrv);
+								if (mcuPos == 0 || mcuPos == sfy || mcuPos == sfy + sfcbh * sfcbv) {
+									currentComponent = components[currentComponent->id % numComponents];
+								}
+								int mcuNum = (x + 1) / (sfy + sfcbh * sfcbv + sfcrh * sfcrv);
+								int loc = (x + 1) % (sfy + sfcbh * sfcbv + sfcrh * sfcrv);
+								int mcuCols = (yBlocksPerRow + sfyh - 1) / sfyh;
+								if (currentComponent->id == 1) {
+									qBlockNum = (mcuNum / mcuCols * sfyv + loc / sfyh) * yBlocksPerRow + (mcuNum % mcuCols * sfyh) + loc % sfyh;
+									if (qBlockNum >= totalYBlocks) {
+										break;
+									}
+								} else if (currentComponent->id == 2) {
+									qBlockNum = totalYBlocks + (x + 1) / (sfy + sfcbh * sfcbv + sfcrh * sfcrv);
+									if (qBlockNum >= totalYBlocks + totalCbBlocks) {
+										break;
+									}
+								} else if (currentComponent->id == 3) {
+									qBlockNum = totalYBlocks + totalCbBlocks + (x + 1) / (sfy + sfcbh * sfcbv + sfcrh * sfcrv);
+									if (qBlockNum >= totalBlocks) {
+										break;
+									}
 								}
 							}
-							printf("completed block %d, address %x\n", count2, ftell(img_ptr));
-							fflush(stdout);
-						}
-						else {
-							printf("end of image found\n");
+						} else {
+							printf("end of file found\n");
 							break;
+						}
+						fflush(stdout);
+					} else {
+						printf("end of scan\n");					
+						break;
+					}
+				}
+				printf("Scan ended at %x\n", ftell(img_ptr));
+				fflush(stdout);
+				for (int x = 0; x < totalBlocks; x++) {
+					for (int a = 0; a < 8; a++) {
+						for (int b = 0; b < 8; b++) {
+							float localSum = 0.0;
+							for (int u = 0; u < 8; u++) {
+								for (int v = 0; v < 8; v++) {
+									float normCoeff = 1.0;
+									if (u == 0) {
+										normCoeff *= 1.0 / sqrt(2.0);
+									}
+									if (v == 0) {
+										normCoeff *= 1.0 / sqrt(2.0);
+									}
+									localSum += normCoeff * preTransBlocks[x].pixels[u][v] * idctTable[u][a] * idctTable[v][b];
+								}
+							}
+							out[x].pixels[a][b] = round(localSum / 4.0) + 128.0;
+						}
+					}
+					out[x].componentId = preTransBlocks[x].componentId;
+				}
+				for (int yBlock = 0; yBlock < totalYBlocks; yBlock++) {
+					int yBlockX = yBlock % yBlocksPerRow;
+					int yBlockY = yBlock / yBlocksPerRow;
+					int cbBlock = (yBlockY / cbRatioV) * cbBlocksPerRow + yBlockX / cbRatioH;
+					int crBlock = (yBlockY / crRatioV) * crBlocksPerRow + yBlockX / crRatioH;
+					for (int index = 0; index < 64; index++) {
+						int yPosX = index % 8;
+						int yPosY = index / 8;
+						float Y = out[yBlock].pixels[yPosX][yPosY];
+						int cbPosX = ((yBlockY * 8 + yPosX) / cbRatioH) % 8;
+						int cbPosY = ((yBlockX * 8 + yPosY) / cbRatioV) % 8;
+						float Cb = out[totalYBlocks + cbBlock].pixels[cbPosX][cbPosY];
+						int crPosX = ((yBlockY * 8 + yPosX) / crRatioH) % 8;
+						int crPosY = ((yBlockX * 8 + yPosY) / crRatioV) % 8;
+						float Cr = out[totalYBlocks + totalCbBlocks + crBlock].pixels[crPosX][crPosY];
+						float R = Y + 1.402 * (Cr - 128.0);
+						float G = Y - 0.344136 * (Cb - 128.0) - 0.714136 * (Cr - 128.0);
+						float B = Y + 1.772 * (Cb - 128.0);
+						imgBlocks[yBlock].pixelsR[yPosX][yPosY] = (unsigned char)(R < 0 ? 0 : R > 255 ? 255 : round(R));
+						imgBlocks[yBlock].pixelsG[yPosX][yPosY] = (unsigned char)(G < 0 ? 0 : G > 255 ? 255 : round(G));
+						imgBlocks[yBlock].pixelsB[yPosX][yPosY] = (unsigned char)(B < 0 ? 0 : B > 255 ? 255 : round(B));
+					}
+				}
+				linearizedImg = malloc(3 * height * width);
+				if (!linearizedImg) {
+					printf("allocation failed\n");
+				}
+				int count = 0;
+				for (int y = 0; y < yBlocksPerCol; y++) {
+					for (int y2 = 0; y2 < 8; y2++) {
+						for (int x = 0; x < yBlocksPerRow; x++) {
+							int blockPos = yBlocksPerRow * y + x;
+							for (int x2 = 0; x2 < 8; x2++) {
+								unsigned char rValue = imgBlocks[blockPos].pixelsR[y2][x2];
+								unsigned char gValue = imgBlocks[blockPos].pixelsG[y2][x2];
+								unsigned char bValue = imgBlocks[blockPos].pixelsB[y2][x2];
+								linearizedImg[count++] = rValue;
+								linearizedImg[count++] = gValue;
+								linearizedImg[count++] = bValue;
+							}
 						}
 					}
 				}
-			}
-			else if (value == startOfFrame2) {
-				printf("Progressive JPEGs not currently supported\n");
-				getchar();
-				return 0;
-			}
-			else {
+				int errorCode = SDL_Init(SDL_INIT_VIDEO);
+				if (errorCode != 0) {
+					SDL_Window* window = SDL_CreateWindow(fileName, width, height, 0);
+					SDL_Renderer* renderer = SDL_CreateRenderer(window, NULL);
+					SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STATIC, width, height);
+					SDL_UpdateTexture(texture, NULL, linearizedImg, 3 * width);
+					SDL_RenderClear(renderer);
+					SDL_RenderTexture(renderer, texture, NULL, NULL);
+					SDL_RenderPresent(renderer);
+					getchar();
+					SDL_DestroyWindow(window);
+					SDL_DestroyRenderer(renderer);
+					SDL_DestroyTexture(texture);
+					SDL_Quit();
+				} else {
+					printf("SDL failed to initialize\n");
+					printf("%s\n", SDL_GetError());
+				}
+				free(linearizedImg);
+				do {
+					fseek(img_ptr, -1L, SEEK_CUR);
+					fread(currentBytes, 1, 1, img_ptr);
+					fseek(img_ptr, -1L, SEEK_CUR);
+				} while (currentBytes[0] != 0xFF);
+			} else if (value == endOfImage) {
+				break;
+			} else {
 				currentBytes[1] = currentBytes[0];
 			}
 		}
 	}
 	fflush(stdout);
-	for (int i = 0; i < numQTables; i++) {
-		free(qtables[i]);
-	}
-	for (int i = 0; i < numComponents; i++) {
-		free(components[i]);
-	}
-	int block = 0;
-	superBlocks = malloc(sizeof(struct pixelBlock) * (height / 8) * (width / 8));
-	for (int y = 0; y < height / (8 * sfyv); y++) {
-		for (int x = 0; x < width / (8 * sfyh); x++) {
-			for (int subY = 0; subY < sfyv; subY++) {
-				for (int subX = 0; subX < sfyh; subX++) {
-					int destX = x * sfyh + subX;
-					int destY = y * sfyv + subY;
-					int dest = destY * width / 8 + destX;
-					superBlocks[dest] = imgBlocks[block++];
-				}
-			}
-		}
-	}
-	free(imgBlocks);
-	linearizedImg = malloc(3 * height * width);
-	printf("image size: %d\n", 3 * height * width);
-	if (!linearizedImg) {
-		printf("allocation failed\n");
-	}
-	int count = 0;
-	for (int y = 0; y < height / 8; y++) {
-		for (int y2 = 0; y2 < 8; y2++) {
-			for (int x = 0; x < width / 8; x++) {
-				int blockPos = (width / 8) * y + x;
-				for (int x2 = 0; x2 < 8; x2++) {
-					unsigned char rValue = superBlocks[blockPos].pixelsR[y2][x2];
-					unsigned char gValue = superBlocks[blockPos].pixelsG[y2][x2];
-					unsigned char bValue = superBlocks[blockPos].pixelsB[y2][x2];
-					linearizedImg[count++] = rValue;
-					linearizedImg[count++] = gValue;
-					linearizedImg[count++] = bValue;
-				}
-			}
-		}
-	}
-	free(superBlocks);
-	int errorCode = SDL_Init(SDL_INIT_VIDEO);
-	if (errorCode != 0) {
-		SDL_Window* window = SDL_CreateWindow(fileName, width, height, 0);
-		SDL_Renderer* renderer = SDL_CreateRenderer(window, NULL);
-		SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STATIC, width, height);
-		SDL_UpdateTexture(texture, NULL, linearizedImg, 3 * width);
-		SDL_RenderClear(renderer);
-		SDL_RenderTexture(renderer, texture, NULL, NULL);
-		SDL_RenderPresent(renderer);
-		getchar();
-		SDL_DestroyWindow(window);
-		SDL_DestroyRenderer(renderer);
-		SDL_DestroyTexture(texture);
-		SDL_Quit();
-	}
-	else {
-		printf("SDL failed to initialize\n");
-		printf("%s\n", SDL_GetError());
-	}
-	free(linearizedImg);
 	fclose(img_ptr);
 	return 0;
 }
