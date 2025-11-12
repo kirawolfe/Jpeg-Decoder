@@ -155,7 +155,6 @@ int main(int argc, char* argv[]) {
 	{20, 22, 33, 38, 46, 51, 55, 60},
 	{21, 34, 37, 47, 50, 56, 59, 61},
 	{35, 36, 48, 49, 57, 58, 62, 63} };
-	int rearranged[8][8];
 	double idctTable[8][8];
 	char numComponents;
 	unsigned char numQTables;
@@ -193,6 +192,10 @@ int main(int argc, char* argv[]) {
 	char crRatioH;
 	char crRatioV;
 	bool progressive;
+	SDL_Window* window = NULL;
+	SDL_Renderer* renderer = NULL;
+	SDL_Texture* texture = NULL;
+
 	errno_t fileError = fopen_s(&img_ptr, fileName, "rb");
 	if (fileError != 0) {
 		perror("Error opening file");
@@ -347,6 +350,15 @@ int main(int argc, char* argv[]) {
 					}
 				}
 				currentComponent = components[0];
+				int errorCode = SDL_Init(SDL_INIT_VIDEO);
+				if (errorCode != 0) {
+					window = SDL_CreateWindow(fileName, width, height, 0);
+					renderer = SDL_CreateRenderer(window, NULL);
+					texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STATIC, width, height);
+				} else {
+					printf("SDL failed to initialize\n");
+					printf("%s\n", SDL_GetError());
+				}
 			} else if (value == startOfScan) {
 				printf("Scan started at %x\n", ftell(img_ptr));
 				bytesRead = fread(currentBytes, 1, 2, img_ptr);
@@ -426,9 +438,6 @@ int main(int argc, char* argv[]) {
 					blocks = totalBlocks;
 					componentId = 1;
 				}
-				if (componentId != currentComponent->id) {
-					eobrun = 0;
-				}
 				currentComponent = components[componentId - 1];
 				for (int x = 0; x < blocks; x++) {
 					if (!endImgFlag && !endScanFlag) {
@@ -486,30 +495,6 @@ int main(int argc, char* argv[]) {
 										char category = node->data & 0x0F;
 										int magnitude = 0;
 										for (int t = 0; t < category; t++) {
-											if (offset == 8) {
-												offset = 0;
-												currentBytes[1] = currentBytes[0];
-												bytesRead = fread(currentBytes, 1, 1, img_ptr);
-												if (currentBytes[1] == 0xFF) {
-													if (currentBytes[0] == 0) {
-														bytesRead = fread(currentBytes, 1, 1, img_ptr);
-														if (bytesRead != 1) {
-															if (feof(img_ptr)) {
-																endFlag = 1;
-															}
-															break;
-														}
-													} else {
-														printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
-														if (currentBytes[0] == 0xD9) {
-															endImgFlag = 1;
-														}
-														endScanFlag = 1;
-														endFlag = 1;
-														break;
-													}
-												}
-											}
 											magnitude = (magnitude << 1) | ((currentBytes[1] >> (7 - offset)) & 1);
 											offset++;
 											if (offset == 8) {
@@ -573,7 +558,7 @@ int main(int argc, char* argv[]) {
 										}
 									}
 								}
-								char nodeData = 0;
+								unsigned char nodeData = 0;
 								struct huffmanNode* acTree = acTrees[currentComponent->acTable];
 								struct huffmanNode* node = (struct huffmanNode*)malloc(sizeof(struct huffmanNode));
 								if (se > 0) {
@@ -623,51 +608,54 @@ int main(int argc, char* argv[]) {
 											break;
 										}
 										if (nodeData == 0) {
-											while (j <= se) {
-												if (progressive && ah > 0 && qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) {
+											if (ah > 0) {
+												eobrun = 1;
+												while (j <= se) {
 													int a = j / 8;
 													int b = j % 8;
-													char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
-													if (refineBit) {
-														if (qBlocks[qBlockNum].pixels[a][b] > 0) {
-															qBlocks[qBlockNum].pixels[a][b] += 1 << al;
-														} else {
-															qBlocks[qBlockNum].pixels[a][b] -= 1 << al;
+													if (qBlocks[qBlockNum].pixels[a][b] != 0) {
+														char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
+														if (refineBit) {
+															if (qBlocks[qBlockNum].pixels[a][b] > 0) {
+																qBlocks[qBlockNum].pixels[a][b] += 1 << al;
+															} else {
+																qBlocks[qBlockNum].pixels[a][b] -= 1 << al;
+															}
 														}
-													}
-													offset++;
-													if (offset == 8) {
-														offset = 0;
-														currentBytes[1] = currentBytes[0];
-														bytesRead = fread(currentBytes, 1, 1, img_ptr);
-														if (currentBytes[1] == 0xFF) {
-															if (currentBytes[0] == 0) {
-																bytesRead = fread(currentBytes, 1, 1, img_ptr);
-																if (bytesRead != 1) {
-																	if (feof(img_ptr)) {
-																		endFlag = 1;
+														offset++;
+														if (offset == 8) {
+															offset = 0;
+															currentBytes[1] = currentBytes[0];
+															bytesRead = fread(currentBytes, 1, 1, img_ptr);
+															if (currentBytes[1] == 0xFF) {
+																if (currentBytes[0] == 0) {
+																	bytesRead = fread(currentBytes, 1, 1, img_ptr);
+																	if (bytesRead != 1) {
+																		if (feof(img_ptr)) {
+																			endFlag = 1;
+																		}
+																		break;
 																	}
+																} else {
+																	printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+																	if (currentBytes[0] == 0xD9) {
+																		endImgFlag = 1;
+																	}
+																	endScanFlag = 1;
+																	endFlag = 1;
 																	break;
 																}
-															} else {
-																printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
-																if (currentBytes[0] == 0xD9) {
-																	endImgFlag = 1;
-																}
-																endScanFlag = 1;
-																endFlag = 1;
-																break;
 															}
 														}
 													}
+													j++;
 												}
-												j++;
 											}
 											break;
 										}
 										char category = nodeData & 0x0F;
 										char runLength = (nodeData >> 4) & 0x0F;
-										if (ah == 0) {
+										if (ah == 0 && category != 0) {
 											for (int q = 0; q < runLength; q++) {
 												if (j > se) {
 													break;
@@ -676,18 +664,21 @@ int main(int argc, char* argv[]) {
 												j++;
 											}
 										}
-										if (nodeData == 0xF0) {
-											if (j > se) {
-												break;
+										if (ah == 0 && nodeData == 0xF0) {
+											for (int q = 0; q < 16; q++) {
+												if (j > se) {
+													break;
+												}
+												idctBase[j / 8][j % 8] = 0;
+												j++;
 											}
-											idctBase[j / 8][j % 8] = 0;
-											j++;
+											continue;
 										}
 										if (category == 0 && runLength != 0x0F) {
 											if (progressive) {
 												int v = 0;
 												for (int p = 0; p < runLength; p++) {
-													v += (currentBytes[1] >> (7 - offset)) & 1;
+													v = (v << 1) | ((currentBytes[1] >> (7 - offset)) & 1);
 													offset++;
 													if (offset == 8) {
 														offset = 0;
@@ -713,51 +704,53 @@ int main(int argc, char* argv[]) {
 															}
 														}
 													}
-													v <<= 1;
 												}
 												if (!endScanFlag) {
-													eobrun = (1 << runLength) + v / 2 - 1;
+													eobrun = (1 << runLength) + v - 1;
 													preTransBlocks[qBlockNum].componentId = currentComponent->id;
-													while (j <= se) {
-														if (progressive && ah > 0 && qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) {
+													if (ah > 0) {
+														while (j <= se) {
 															int a = j / 8;
 															int b = j % 8;
-															char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
-															if (refineBit) {
-																if (qBlocks[qBlockNum].pixels[a][b] > 0) {
-																	qBlocks[qBlockNum].pixels[a][b] += 1 << al;
-																} else {
-																	qBlocks[qBlockNum].pixels[a][b] -= 1 << al;
+															if (qBlocks[qBlockNum].pixels[a][b] != 0) {
+																char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
+																if (refineBit) {
+																	if (qBlocks[qBlockNum].pixels[a][b] > 0) {
+																		qBlocks[qBlockNum].pixels[a][b] += 1 << al;
+																	} else {
+																		qBlocks[qBlockNum].pixels[a][b] -= 1 << al;
+																	}
 																}
-															}
-															offset++;
-															if (offset == 8) {
-																offset = 0;
-																currentBytes[1] = currentBytes[0];
-																bytesRead = fread(currentBytes, 1, 1, img_ptr);
-																if (currentBytes[1] == 0xFF) {
-																	if (currentBytes[0] == 0) {
-																		bytesRead = fread(currentBytes, 1, 1, img_ptr);
-																		if (bytesRead != 1) {
-																			if (feof(img_ptr)) {
-																				endFlag = 1;
+																offset++;
+																if (offset == 8) {
+																	offset = 0;
+																	currentBytes[1] = currentBytes[0];
+																	bytesRead = fread(currentBytes, 1, 1, img_ptr);
+																	if (currentBytes[1] == 0xFF) {
+																		if (currentBytes[0] == 0) {
+																			bytesRead = fread(currentBytes, 1, 1, img_ptr);
+																			if (bytesRead != 1) {
+																				if (feof(img_ptr)) {
+																					endFlag = 1;
+																				}
+																				break;
 																			}
+																		} else {
+																			printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+																			if (currentBytes[0] == 0xD9) {
+																				endImgFlag = 1;
+																			}
+																			endScanFlag = 1;
+																			endFlag = 1;
 																			break;
 																		}
-																	} else {
-																		printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
-																		if (currentBytes[0] == 0xD9) {
-																			endImgFlag = 1;
-																		}
-																		endScanFlag = 1;
-																		endFlag = 1;
-																		break;
 																	}
 																}
 															}
+															j++;
 														}
-														j++;
 													}
+													break;
 												}
 											} else {
 												while (j < 64) {
@@ -831,7 +824,7 @@ int main(int argc, char* argv[]) {
 															}
 														}
 													}
-													while (f > 0 || qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0 && j <= se) {
+													while ((f > 0 || qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) && j <= se) {
 														if (qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) {
 															int a = j / 8;
 															int b = j % 8;
@@ -873,64 +866,69 @@ int main(int argc, char* argv[]) {
 														}
 														j++;
 													}
-													if (extraBit != 0) {
-														qBlocks[qBlockNum].pixels[j / 8][j % 8] = 1 << al;
-													} else {
-														qBlocks[qBlockNum].pixels[j / 8][j % 8] = -(1 << al);
-													}
-												} else if (category == 0) {
-													if (runLength == 0x0F) {
-														int f = runLength + 1;
-														while (f > 0) {
-															if (qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) {
-																int a = j / 8;
-																int b = j % 8;
-																char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
-																if (refineBit) {
-																	if (qBlocks[qBlockNum].pixels[a][b] > 0) {
-																		qBlocks[qBlockNum].pixels[a][b] += 1 << al;
-																	} else {
-																		qBlocks[qBlockNum].pixels[a][b] -= 1 << al;
-																	}
-																}
-																offset++;
-																if (offset == 8) {
-																	offset = 0;
-																	currentBytes[1] = currentBytes[0];
-																	bytesRead = fread(currentBytes, 1, 1, img_ptr);
-																	if (currentBytes[1] == 0xFF) {
-																		if (currentBytes[0] == 0) {
-																			bytesRead = fread(currentBytes, 1, 1, img_ptr);
-																			if (bytesRead != 1) {
-																				if (feof(img_ptr)) {
-																					endFlag = 1;
-																				}
-																				break;
-																			}
-																		} else {
-																			printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
-																			if (currentBytes[0] == 0xD9) {
-																				endImgFlag = 1;
-																			}
-																			endScanFlag = 1;
-																			endFlag = 1;
-																			break;
-																		}
-																	}
-																}
-															} else {
-																f--;
-															}
-															j++;
+													if (j <= se) {
+														if (extraBit != 0) {
+															qBlocks[qBlockNum].pixels[j / 8][j % 8] = 1 << al;
+														} else {
+															qBlocks[qBlockNum].pixels[j / 8][j % 8] = -(1 << al);
 														}
 													}
+													continue;
+												} else if (category == 0) {
+													int f = runLength;
+													if (runLength == 0x0F) {
+														f++;
+													}
+													while (f > 0 && j <= se) {
+														if (qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) {
+															int a = j / 8;
+															int b = j % 8;
+															char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
+															if (refineBit) {
+																if (qBlocks[qBlockNum].pixels[a][b] > 0) {
+																	qBlocks[qBlockNum].pixels[a][b] += 1 << al;
+																} else {
+																	qBlocks[qBlockNum].pixels[a][b] -= 1 << al;
+																}
+															}
+															offset++;
+															if (offset == 8) {
+																offset = 0;
+																currentBytes[1] = currentBytes[0];
+																bytesRead = fread(currentBytes, 1, 1, img_ptr);
+																if (currentBytes[1] == 0xFF) {
+																	if (currentBytes[0] == 0) {
+																		bytesRead = fread(currentBytes, 1, 1, img_ptr);
+																		if (bytesRead != 1) {
+																			if (feof(img_ptr)) {
+																				endFlag = 1;
+																			}
+																			break;
+																		}
+																	} else {
+																		printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
+																		if (currentBytes[0] == 0xD9) {
+																			endImgFlag = 1;
+																		}
+																		endScanFlag = 1;
+																		endFlag = 1;
+																		break;
+																	}
+																}
+															}
+														} else {
+															f--;
+														}
+														j++;
+													}
+													continue;
 												}
 											}
 										}
 									}
-								}
-								for (int a = se + 1; a < 64; a++) {
-									idctBase[a / 8][a % 8] = 0;
+								}		
+								for (int j = se + 1; j < 64; j++) {
+									idctBase[j / 8][j % 8] = 0;
 								}
 								if (!progressive || (se == 0 && ah == 0)) {
 									for (int a = 0; a < 8; a++) {
@@ -947,9 +945,10 @@ int main(int argc, char* argv[]) {
 									}
 									for (int a = 0; a < 8; a++) {
 										for (int b = 0; b < 8; b++) {
-											rearranged[a][b] = idctBase[zigzag[a][b] / 8][zigzag[a][b] % 8];
 											qBlocks[qBlockNum].pixels[a][b] = idctBase[a][b];
-											preTransBlocks[qBlockNum].pixels[a][b] = rearranged[a][b];
+											if (!progressive) {
+												preTransBlocks[qBlockNum].pixels[a][b] = idctBase[zigzag[a][b] / 8][zigzag[a][b] % 8];
+											}
 										}
 									}
 								} else {
@@ -971,10 +970,10 @@ int main(int argc, char* argv[]) {
 								preTransBlocks[qBlockNum].componentId = currentComponent->id;
 								free(node);
 							} else {
-								for (int index = 0; index < 64; index++) {
-									int a = index / 8;
-									int b = index % 8;
-									if (ah > 0 && index >= ss && index <= se) {
+								if (ah > 0) {
+									for (int index = ss; index <= se; index++) {
+										int a = index / 8;
+										int b = index % 8;
 										if (qBlocks[qBlockNum].pixels[a][b] != 0) {
 											char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
 											if (refineBit) {
@@ -1011,6 +1010,10 @@ int main(int argc, char* argv[]) {
 											}
 										}
 									}
+								}
+								for (int index = 0; index < 64; index++) {
+									int a = index / 8;
+									int b = index % 8;
 									preTransBlocks[qBlockNum].pixels[a][b] = qBlocks[qBlockNum].pixels[zigzag[a][b] / 8][zigzag[a][b] % 8] * qt->data[zigzag[a][b] / 8][zigzag[a][b] % 8];
 								}
 								preTransBlocks[qBlockNum].componentId = currentComponent->id;
@@ -1125,24 +1128,11 @@ int main(int argc, char* argv[]) {
 						}
 					}
 				}
-				int errorCode = SDL_Init(SDL_INIT_VIDEO);
-				if (errorCode != 0) {
-					SDL_Window* window = SDL_CreateWindow(fileName, width, height, 0);
-					SDL_Renderer* renderer = SDL_CreateRenderer(window, NULL);
-					SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STATIC, width, height);
-					SDL_UpdateTexture(texture, NULL, linearizedImg, 3 * width);
-					SDL_RenderClear(renderer);
-					SDL_RenderTexture(renderer, texture, NULL, NULL);
-					SDL_RenderPresent(renderer);
-					getchar();
-					SDL_DestroyWindow(window);
-					SDL_DestroyRenderer(renderer);
-					SDL_DestroyTexture(texture);
-					SDL_Quit();
-				} else {
-					printf("SDL failed to initialize\n");
-					printf("%s\n", SDL_GetError());
-				}
+				SDL_UpdateTexture(texture, NULL, linearizedImg, 3 * width);
+				SDL_RenderClear(renderer);
+				SDL_RenderTexture(renderer, texture, NULL, NULL);
+				SDL_RenderPresent(renderer);
+				SDL_Delay(1000);
 				free(linearizedImg);
 				do {
 					fseek(img_ptr, -1L, SEEK_CUR);
@@ -1158,5 +1148,10 @@ int main(int argc, char* argv[]) {
 	}
 	fflush(stdout);
 	fclose(img_ptr);
+	getchar();
+	SDL_DestroyWindow(window);
+	SDL_DestroyRenderer(renderer);
+	SDL_DestroyTexture(texture);
+	SDL_Quit();
 	return 0;
 }
