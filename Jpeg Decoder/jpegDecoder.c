@@ -607,52 +607,6 @@ int main(int argc, char* argv[]) {
 										if (endScanFlag || endImgFlag || endFlag) {
 											break;
 										}
-										if (nodeData == 0) {
-											if (ah > 0) {
-												eobrun = 1;
-												while (j <= se) {
-													int a = j / 8;
-													int b = j % 8;
-													if (qBlocks[qBlockNum].pixels[a][b] != 0) {
-														char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
-														if (refineBit) {
-															if (qBlocks[qBlockNum].pixels[a][b] > 0) {
-																qBlocks[qBlockNum].pixels[a][b] += 1 << al;
-															} else {
-																qBlocks[qBlockNum].pixels[a][b] -= 1 << al;
-															}
-														}
-														offset++;
-														if (offset == 8) {
-															offset = 0;
-															currentBytes[1] = currentBytes[0];
-															bytesRead = fread(currentBytes, 1, 1, img_ptr);
-															if (currentBytes[1] == 0xFF) {
-																if (currentBytes[0] == 0) {
-																	bytesRead = fread(currentBytes, 1, 1, img_ptr);
-																	if (bytesRead != 1) {
-																		if (feof(img_ptr)) {
-																			endFlag = 1;
-																		}
-																		break;
-																	}
-																} else {
-																	printf("Marker found: %x, address: %x\n", currentBytes[1] << 8 | currentBytes[0], ftell(img_ptr));
-																	if (currentBytes[0] == 0xD9) {
-																		endImgFlag = 1;
-																	}
-																	endScanFlag = 1;
-																	endFlag = 1;
-																	break;
-																}
-															}
-														}
-													}
-													j++;
-												}
-											}
-											break;
-										}
 										char category = nodeData & 0x0F;
 										char runLength = (nodeData >> 4) & 0x0F;
 										if (ah == 0 && category != 0) {
@@ -672,6 +626,7 @@ int main(int argc, char* argv[]) {
 												idctBase[j / 8][j % 8] = 0;
 												j++;
 											}
+											j--;
 											continue;
 										}
 										if (category == 0 && runLength != 0x0F) {
@@ -824,10 +779,10 @@ int main(int argc, char* argv[]) {
 															}
 														}
 													}
-													while ((f > 0 || qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) && j <= se) {
-														if (qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) {
-															int a = j / 8;
-															int b = j % 8;
+													int a = j / 8;
+													int b = j % 8;
+													while ((f > 0 || qBlocks[qBlockNum].pixels[a][b] != 0) && (j <= se)) {
+														if (qBlocks[qBlockNum].pixels[a][b] != 0) {
 															char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
 															if (refineBit) {
 																if (qBlocks[qBlockNum].pixels[a][b] > 0) {
@@ -865,12 +820,14 @@ int main(int argc, char* argv[]) {
 															f--;
 														}
 														j++;
+														a = j / 8;
+														b = j % 8;
 													}
 													if (j <= se) {
 														if (extraBit != 0) {
-															qBlocks[qBlockNum].pixels[j / 8][j % 8] = 1 << al;
+															qBlocks[qBlockNum].pixels[a][b] = 1 << al;
 														} else {
-															qBlocks[qBlockNum].pixels[j / 8][j % 8] = -(1 << al);
+															qBlocks[qBlockNum].pixels[a][b] = -(1 << al);
 														}
 													}
 													continue;
@@ -880,9 +837,9 @@ int main(int argc, char* argv[]) {
 														f++;
 													}
 													while (f > 0 && j <= se) {
-														if (qBlocks[qBlockNum].pixels[j / 8][j % 8] != 0) {
-															int a = j / 8;
-															int b = j % 8;
+														int a = j / 8;
+														int b = j % 8;
+														if (qBlocks[qBlockNum].pixels[a][b] != 0) {
 															char refineBit = ((currentBytes[1] >> (7 - offset)) & 1);
 															if (refineBit) {
 																if (qBlocks[qBlockNum].pixels[a][b] > 0) {
@@ -921,6 +878,7 @@ int main(int argc, char* argv[]) {
 														}
 														j++;
 													}
+													j--;
 													continue;
 												}
 											}
